@@ -1,0 +1,11 @@
+Flask
+# pytesseract # Removing - Replaced by Image LLM
+Pillow
+requests
+flask-cors
+# opencv-python # Removing - Replaced by Image LLM
+python-dotenv # For loading .env file
+google-generativeai # For Gemini Vision API
+Flask-SQLAlchemy # For database ORM
+SQLAlchemy # Core ORM library (often needed explicitly with newer Flask-SQLAlchemy)
+PyJWT # For generating/decoding JWT tokens 
