@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { fetchWithAuth } from '../utils/api';
 
 function BookshelfDetail({ shelfId, onBackToList }) {
@@ -30,12 +30,7 @@ function BookshelfDetail({ shelfId, onBackToList }) {
   const [updateShelfError, setUpdateShelfError] = useState(null);
 
   // Fetch shelf details when shelfId changes
-  useEffect(() => {
-    if (!shelfId) return; 
-    loadShelfDetails();
-  }, [shelfId]);
-
-  const loadShelfDetails = async () => {
+  const loadShelfDetails = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     setShelf(null); 
@@ -60,7 +55,12 @@ function BookshelfDetail({ shelfId, onBackToList }) {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [shelfId]);
+
+  useEffect(() => {
+    if (!shelfId) return;
+    loadShelfDetails();
+  }, [shelfId, loadShelfDetails]);
 
   // Handle adding a new book
   const handleAddBook = async (event) => {

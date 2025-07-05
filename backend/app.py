@@ -11,34 +11,108 @@ import requests
 # from collections import Counter # No longer needed
 from dotenv import load_dotenv
 import google.generativeai as genai
+import requests_cache
 from flask_sqlalchemy import SQLAlchemy
-from werkzeug.security import generate_password_hash, check_password_hash # For password hashing
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import jwt # For JWT token generation/decoding
 from datetime import datetime, timedelta, timezone # For setting token expiry
 from functools import wraps # Added for decorator
-import logging # Import the logging library
+import logging  # Import the logging library
+import bleach  # For sanitizing user input
 
 # Load environment variables from .env file
-load_dotenv() # Takes environment variables from .env
+load_dotenv()  # Takes environment variables from .env
 
-# --- Configure Logging --- 
-logging.basicConfig(level=logging.INFO, 
+# --- Configure Logging ---
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+numeric_level = getattr(logging, log_level, logging.INFO)
+logging.basicConfig(level=numeric_level,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__) # Get a logger instance for this module
 # --- End Logging Config ---
 
+# Setup request caching to reduce API calls
+cache_expiry = int(os.getenv('CACHE_EXPIRY', '86400'))  # defaults to 24h
+requests_cache.install_cache('books_cache', expire_after=cache_expiry)
+
+# Setup rate limiting
+rate_limit = os.getenv('RATE_LIMIT', '200 per hour')
+limiter = Limiter(key_func=get_remote_address, default_limits=[rate_limit])
+
+# JWT token expiry in hours (default 1 hour)
+token_expiry_hours = int(os.getenv('TOKEN_EXPIRY_HOURS', '1'))
+
+# --- Simple OpenAPI Specification ---
+OPENAPI_SPEC = {
+    "openapi": "3.0.0",
+    "info": {
+        "title": "Bookshelf Recommender API",
+        "version": "1.0.0",
+    },
+    "paths": {
+        "/api/register": {"post": {"summary": "Create a new user"}},
+        "/api/login": {"post": {"summary": "Log in and receive a token"}},
+        "/api/bookshelves": {
+            "get": {"summary": "List user's bookshelves"},
+            "post": {"summary": "Create a new bookshelf"},
+        },
+        "/api/bookshelves/{id}": {
+            "get": {"summary": "Retrieve a bookshelf"},
+            "put": {"summary": "Update a bookshelf"},
+            "delete": {"summary": "Delete a bookshelf"},
+        },
+        "/api/upload": {"post": {"summary": "Upload an image for analysis"}},
+        "/api/friends": {"get": {"summary": "List confirmed friends"}},
+        "/api/friends/requests": {"get": {"summary": "List incoming requests"}},
+        "/api/friends/outgoing": {"get": {"summary": "List outgoing requests"}},
+        "/api/friends/{user_id}": {
+            "post": {"summary": "Send or accept a request"},
+            "delete": {"summary": "Cancel, decline or remove"},
+        },
+        "/api/communities": {
+            "get": {"summary": "List communities"},
+            "post": {"summary": "Create a community"}
+        },
+        "/api/communities/{id}/join": {"post": {"summary": "Join a community"}},
+        "/api/communities/{id}/leave": {"delete": {"summary": "Leave a community"}},
+        "/api/communities/{id}/members": {"get": {"summary": "List community members"}},
+        "/api/communities/mine": {"get": {"summary": "List user's communities"}},
+        "/api/communities/{id}": {
+            "get": {"summary": "Retrieve a community"},
+            "put": {"summary": "Update a community"},
+            "delete": {"summary": "Delete a community"},
+        },
+        "/api/users/{user_id}/bookshelves": {"get": {"summary": "View a user's bookshelves"}},
+        "/api/public/bookshelves": {"get": {"summary": "List public shelves"}},
+        "/api/public/bookshelves/{id}": {
+            "get": {"summary": "View a public shelf"}
+        },
+        "/api/health": {"get": {"summary": "Health check"}},
+        "/api/spec": {"get": {"summary": "Retrieve this OpenAPI spec"}},
+    },
+}
+
+# --- Input Sanitization Helper ---
+def sanitize_input(value: str) -> str:
+    """Return a cleaned version of the user-supplied string."""
+    if value is None:
+        return None
+    return bleach.clean(value, strip=True)
+# --- End Sanitization Helper ---
+
 # Configure the Gemini API key
 api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
-    print("Error: GOOGLE_API_KEY not found in .env file. Please create a backend/.env file.")
-    # Consider how to handle this - maybe disable the upload endpoint?
+    logger.error("GOOGLE_API_KEY not found in environment. Uploads will be disabled.")
 else:
     try:
         genai.configure(api_key=api_key)
-        print("Gemini API Key configured successfully.")
+        logger.info("Gemini API Key configured successfully.")
     except Exception as e:
-        print(f"Error configuring Gemini API: {e}")
-        api_key = None # Ensure api_key is None if configuration fails
+        logger.error(f"Error configuring Gemini API: {e}")
+        api_key = None  # Ensure api_key is None if configuration fails
 
 # Create upload folder if it doesn't exist
 UPLOAD_FOLDER = 'uploads'
@@ -47,7 +121,10 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 # --- Add JWT Secret Key Configuration ---
 # IMPORTANT: Use a strong, secret key and keep it out of version control (e.g., in .env)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'fallback-super-secret-key-for-dev-only') 
+secret_key = os.getenv('SECRET_KEY')
+if not secret_key:
+    raise RuntimeError('SECRET_KEY environment variable not set.')
+app.config['SECRET_KEY'] = secret_key
 # --- End JWT Secret Key --- 
 
 # Define the database name
@@ -61,6 +138,36 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Limit uploads to 16MB
 
 # Initialize SQLAlchemy database extension
 db = SQLAlchemy(app)
+limiter.init_app(app)
+
+# --- Error Handlers ---
+@app.errorhandler(404)
+def handle_404(e):
+    """Return JSON response for 404 errors."""
+    logger.warning(f"Route not found: {request.path}")
+    return jsonify({"error": "Not found"}), 404
+
+
+@app.errorhandler(405)
+def handle_405(e):
+    """Return JSON response for method not allowed errors."""
+    logger.warning(f"Method not allowed: {request.method} {request.path}")
+    return jsonify({"error": "Method not allowed"}), 405
+
+
+@app.errorhandler(429)
+def handle_rate_limit(e):
+    """Return JSON response when rate limit is exceeded."""
+    logger.warning(f"Rate limit exceeded: {request.remote_addr}")
+    return jsonify({"error": "Too many requests"}), 429
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    """Return JSON response for internal server errors."""
+    logger.error(f"Internal server error: {e}")
+    return jsonify({"error": "Internal server error"}), 500
+# --- End Error Handlers ---
 
 # Initialize the specific Gemini model we want to use
 llm_model = None
@@ -68,9 +175,9 @@ if api_key:
     try:
         # Using gemini-1.5-flash as it's fast and suitable for this kind of task
         llm_model = genai.GenerativeModel('gemini-1.5-flash')
-        print("Gemini model (gemini-1.5-flash) loaded successfully.")
+        logger.info("Gemini model (gemini-1.5-flash) loaded successfully.")
     except Exception as e:
-        print(f"Error initializing Gemini model: {e}")
+        logger.error(f"Error initializing Gemini model: {e}")
         llm_model = None # Ensure model is None if init fails
 
 # === Database Models === 
@@ -135,6 +242,7 @@ class Book(db.Model):
     authors = db.Column(db.String(255), nullable=True) 
     isbn = db.Column(db.String(13), unique=True, nullable=True) # Added ISBN field
     # Optional: Add fields like openlibrary_id, google_books_id, cover_image_url later
+    cover_image_url = db.Column(db.String(255), nullable=True)  # Optional cover image
     added_at = db.Column(db.DateTime, server_default=db.func.now())
     
     # Note: The relationship back to Bookshelf is defined via the backref in Bookshelf.books
@@ -142,12 +250,55 @@ class Book(db.Model):
     def __repr__(self):
         return f'<Book {self.title}>'
 
+# Friend request relationship between users
+class FriendRequest(db.Model):
+    """Represents a friendship invitation between two users."""
+    __tablename__ = 'friend_request'
+    id = db.Column(db.Integer, primary_key=True)
+    requester_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    addressee_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    status = db.Column(db.String(20), default='pending', nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    def __repr__(self):
+        return f'<FriendRequest from {self.requester_id} to {self.addressee_id}>'
+
+# Association table between users and communities
+community_members = db.Table(
+    'community_members',
+    db.Column('community_id', db.Integer, db.ForeignKey('community.id'), primary_key=True),
+    db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True)
+)
+
+class Community(db.Model):
+    """Simple community/group for collaborative bookshelves."""
+    __tablename__ = 'community'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), unique=True, nullable=False)
+    description = db.Column(db.String(250))
+    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    owner = db.relationship('User', backref='owned_communities')
+    members = db.relationship('User', secondary=community_members, backref='communities')
+
 # === API Endpoints ===
 
 @app.route('/api/hello')
 def hello_world():
     """Simple test endpoint to confirm backend is running."""
     return {'message': 'Hello from Backend!'}
+
+
+@app.route('/api/health')
+def health_check():
+    """Return a basic status message for monitoring."""
+    return jsonify({'status': 'ok'}), 200
+
+
+@app.route('/api/spec')
+def openapi_spec():
+    """Return a machine-readable OpenAPI specification."""
+    return jsonify(OPENAPI_SPEC), 200
 
 # --- JWT Token Required Decorator ---
 def token_required(f):
@@ -335,8 +486,8 @@ def register_user():
     if not data or not data.get('username') or not data.get('email') or not data.get('password'):
         return jsonify({'error': 'Missing username, email, or password'}), 400
         
-    username = data['username'].strip()
-    email = data['email'].strip().lower()
+    username = sanitize_input(data['username'].strip())
+    email = sanitize_input(data['email'].strip().lower())
     password = data['password']
     
     # Basic validation checks (can be expanded)
@@ -361,14 +512,14 @@ def register_user():
     
     try:
         db.session.add(new_user)
-        db.session.commit() # Commit user first to get the ID
-        print(f"Registered new user: {username} (ID: {new_user.id})")
+        db.session.commit()  # Commit user first to get the ID
+        logger.info(f"Registered new user: {username} (ID: {new_user.id})")
         
         # Create a default bookshelf for the new user
         default_shelf = Bookshelf(name=f"{username}'s Bookshelf", owner=new_user)
         db.session.add(default_shelf)
         db.session.commit()
-        print(f"Created default bookshelf for user: {username}")
+        logger.info(f"Created default bookshelf for user: {username}")
         
         # Consider returning user info (without password hash) or a token
         return jsonify({
@@ -376,18 +527,19 @@ def register_user():
             'user': { 'id': new_user.id, 'username': new_user.username, 'email': new_user.email }
         }), 201 # Created
     except Exception as e:
-        db.session.rollback() # Important: Rollback session on error
-        print(f"Error during registration DB commit: {e}")
+        db.session.rollback()  # Rollback session on error
+        logger.error(f"Error during registration DB commit: {e}")
         return jsonify({'error': 'Registration failed due to a server error.'}), 500
 
 @app.route('/api/login', methods=['POST'])
+@limiter.limit("5 per minute")
 def login_user():
     """Logs a user in by verifying credentials and returns a JWT."""
     data = request.get_json()
     if not data or not data.get('identifier') or not data.get('password'):
         return jsonify({'error': 'Missing identifier (username or email) or password'}), 400
 
-    identifier = data['identifier'].strip()
+    identifier = sanitize_input(data['identifier'].strip())
     password = data['password']
     user = User.query.filter(
         (db.func.lower(User.username) == db.func.lower(identifier)) | 
@@ -397,27 +549,28 @@ def login_user():
     if user and user.check_password(password):
         # Login successful - Generate JWT
         try:
+            expiry_hours = int(os.getenv('TOKEN_EXPIRY_HOURS', str(token_expiry_hours)))
             token_payload = {
                 'user_id': user.id,
                 'username': user.username,
-                'exp': datetime.now(timezone.utc) + timedelta(hours=1) # Token expires in 1 hour
+                'exp': datetime.now(timezone.utc) + timedelta(hours=expiry_hours)
             }
             token = jwt.encode(
                 token_payload, 
                 app.config['SECRET_KEY'], 
                 algorithm='HS256'
             )
-            print(f"User {user.username} logged in successfully. Token generated.")
+            logger.info(f"User {user.username} logged in successfully. Token generated.")
             return jsonify({
                 'message': f'User {user.username} logged in successfully!',
                 'user': { 'id': user.id, 'username': user.username, 'email': user.email },
                 'token': token # Return the generated token
             }), 200
         except Exception as e:
-            print(f"Error generating token for user {user.username}: {e}")
+            logger.error(f"Error generating token for user {user.username}: {e}")
             return jsonify({'error': 'Login succeeded but failed to generate session token.'}), 500
     else:
-        print(f"Login failed for identifier: {identifier}")
+        logger.warning(f"Login failed for identifier: {identifier}")
         return jsonify({'error': 'Invalid username/email or password'}), 401 
 
 # --- Example Protected Endpoint --- 
@@ -468,8 +621,8 @@ def handle_bookshelves():
         if not data or not data.get('name'):
             return jsonify({'error': 'Bookshelf name is required'}), 400
             
-        name = data['name'].strip()
-        description = data.get('description', '').strip()
+        name = sanitize_input(data['name'].strip())
+        description = sanitize_input(data.get('description', '').strip())
         is_public = data.get('is_public', False)
         
         if not name:
@@ -623,7 +776,6 @@ def add_book_to_shelf(shelf_id):
         return jsonify({"error": "Book title cannot be empty"}), 400
 
     # Optional: Check if book already exists in this shelf (e.g., by ISBN or title/author)
-    # existing_book = Book.query.filter_by(bookshelf_id=shelf.id, isbn=isbn).first() # Example check
     # if existing_book:
     #     return jsonify({"error": "Book already exists in this shelf"}), 409
 
@@ -632,11 +784,11 @@ def add_book_to_shelf(shelf_id):
         authors=author,
         isbn=isbn,
         cover_image_url=cover_image_url,
-        bookshelf_id=shelf.id # Associate with the found shelf
     )
     
     try:
         db.session.add(new_book)
+        shelf.books.append(new_book)
         db.session.commit()
         logger.info(f"Book '{title}' added to bookshelf {shelf_id} by user {user_id}")
         # Return the created book data
@@ -679,6 +831,338 @@ def delete_book_from_shelf(book_id):
         logger.error(f"Failed to delete book {book_id} for user {user_id}: {e}")
         return jsonify({"error": "Failed to delete book"}), 500
 
+# --- Public Bookshelf Endpoints ---
+
+@app.route('/api/public/bookshelves', methods=['GET'])
+def list_public_bookshelves():
+    """Return all bookshelves marked as public."""
+    shelves = Bookshelf.query.filter_by(is_public=True).order_by(Bookshelf.created_at.desc()).all()
+    results = []
+    for shelf in shelves:
+        results.append({
+            'id': shelf.id,
+            'name': shelf.name,
+            'description': shelf.description,
+            'owner': {'id': shelf.owner.id, 'username': shelf.owner.username},
+            'book_count': len(shelf.books),
+            'created_at': shelf.created_at.isoformat() if shelf.created_at else None
+        })
+    return jsonify(results), 200
+
+
+@app.route('/api/public/bookshelves/<int:shelf_id>', methods=['GET'])
+def get_public_bookshelf(shelf_id):
+    """Retrieve a single public bookshelf and its books."""
+    shelf = Bookshelf.query.filter_by(id=shelf_id, is_public=True).first()
+    if not shelf:
+        return jsonify({'error': 'Bookshelf not found'}), 404
+
+    books_data = []
+    for book in shelf.books:
+        books_data.append({
+            'id': book.id,
+            'title': book.title,
+            'author': book.authors,
+            'isbn': book.isbn,
+            'cover_image_url': book.cover_image_url,
+            'added_at': book.added_at.isoformat() if book.added_at else None
+        })
+
+    return jsonify({
+        'id': shelf.id,
+        'name': shelf.name,
+        'description': shelf.description,
+        'owner': {'id': shelf.owner.id, 'username': shelf.owner.username},
+        'created_at': shelf.created_at.isoformat() if shelf.created_at else None,
+        'books': books_data
+    }), 200
+
+# --- Social / Friends Endpoints ---
+
+@app.route('/api/friends', methods=['GET'])
+@token_required
+def list_friends():
+    """Return a list of friends for the logged-in user."""
+    user_id = g.user_id
+    friendships = FriendRequest.query.filter(
+        FriendRequest.status == 'accepted',
+        ((FriendRequest.requester_id == user_id) | (FriendRequest.addressee_id == user_id))
+    ).all()
+    results = []
+    for fr in friendships:
+        friend_id = fr.addressee_id if fr.requester_id == user_id else fr.requester_id
+        user = User.query.get(friend_id)
+        if user:
+            results.append({'id': user.id, 'username': user.username})
+    return jsonify(results), 200
+
+
+@app.route('/api/friends/requests', methods=['GET'])
+@token_required
+def list_friend_requests():
+    """List pending friend requests for the logged-in user."""
+    user_id = g.user_id
+    requests_q = FriendRequest.query.filter_by(addressee_id=user_id, status='pending').all()
+    results = []
+    for fr in requests_q:
+        requester = User.query.get(fr.requester_id)
+        if requester:
+            results.append({'id': fr.id, 'from_user': {'id': requester.id, 'username': requester.username}})
+    return jsonify(results), 200
+
+
+@app.route('/api/friends/<int:target_id>', methods=['POST'])
+@token_required
+def add_or_accept_friend(target_id):
+    """Send or accept a friend request."""
+    user_id = g.user_id
+    if user_id == target_id:
+        return jsonify({'error': 'Cannot befriend yourself'}), 400
+
+    target = User.query.get(target_id)
+    if not target:
+        return jsonify({'error': 'User not found'}), 404
+
+    existing = FriendRequest.query.filter(
+        ((FriendRequest.requester_id == user_id) & (FriendRequest.addressee_id == target_id)) |
+        ((FriendRequest.requester_id == target_id) & (FriendRequest.addressee_id == user_id))
+    ).first()
+
+    if existing:
+        if existing.status == 'accepted':
+            return jsonify({'message': 'Already friends'}), 200
+        if existing.addressee_id == user_id and existing.status == 'pending':
+            existing.status = 'accepted'
+            db.session.commit()
+            return jsonify({'message': 'Friend request accepted'}), 200
+        return jsonify({'error': 'Friend request already sent'}), 409
+
+    fr = FriendRequest(requester_id=user_id, addressee_id=target_id)
+    db.session.add(fr)
+    db.session.commit()
+    return jsonify({'message': 'Friend request sent'}), 201
+
+
+@app.route('/api/friends/outgoing', methods=['GET'])
+@token_required
+def list_outgoing_requests():
+    """List friend requests the user has sent that are pending."""
+    user_id = g.user_id
+    pending = FriendRequest.query.filter_by(requester_id=user_id, status='pending').all()
+    results = []
+    for fr in pending:
+        user = User.query.get(fr.addressee_id)
+        if user:
+            results.append({'id': fr.id, 'to_user': {'id': user.id, 'username': user.username}})
+    return jsonify(results), 200
+
+
+@app.route('/api/friends/<int:target_id>', methods=['DELETE'])
+@token_required
+def remove_or_cancel_friend(target_id):
+    """Remove a friend or cancel/decline a request."""
+    user_id = g.user_id
+    fr = FriendRequest.query.filter(
+        ((FriendRequest.requester_id == user_id) & (FriendRequest.addressee_id == target_id)) |
+        ((FriendRequest.requester_id == target_id) & (FriendRequest.addressee_id == user_id))
+    ).first()
+    if not fr:
+        return jsonify({'error': 'No friend relationship or request found'}), 404
+
+    if fr.status == 'pending':
+        # If the logged-in user sent the request, cancel it. Otherwise decline it.
+        if fr.requester_id == user_id:
+            db.session.delete(fr)
+            db.session.commit()
+            return jsonify({'message': 'Friend request canceled'}), 200
+        elif fr.addressee_id == user_id:
+            fr.status = 'declined'
+            db.session.commit()
+            return jsonify({'message': 'Friend request declined'}), 200
+
+    db.session.delete(fr)
+    db.session.commit()
+    return jsonify({'message': 'Friend removed'}), 200
+
+
+# --- Community Endpoints ---
+
+@app.route('/api/communities', methods=['GET'])
+def list_communities():
+    """Return all communities."""
+    communities = Community.query.order_by(Community.name).all()
+    results = []
+    for c in communities:
+        results.append({
+            'id': c.id,
+            'name': c.name,
+            'description': c.description,
+            'member_count': len(c.members),
+            'owner_id': c.owner_id,
+        })
+    return jsonify(results), 200
+
+
+@app.route('/api/communities', methods=['POST'])
+@token_required
+def create_community():
+    """Create a new community and join it."""
+    data = request.get_json()
+    if not data or not data.get('name'):
+        return jsonify({'error': 'Community name is required'}), 400
+
+    name = sanitize_input(data['name'].strip())
+    description = sanitize_input(data.get('description', '').strip())
+    if Community.query.filter_by(name=name).first():
+        return jsonify({'error': 'Community already exists'}), 409
+
+    community = Community(name=name, description=description, owner_id=g.user_id)
+    user = User.query.get(g.user_id)
+    community.members.append(user)
+    db.session.add(community)
+    db.session.commit()
+    return jsonify({'id': community.id, 'name': community.name, 'description': community.description}), 201
+
+
+@app.route('/api/communities/<int:comm_id>/join', methods=['POST'])
+@token_required
+def join_community(comm_id):
+    """Join an existing community."""
+    community = Community.query.get(comm_id)
+    if not community:
+        return jsonify({'error': 'Community not found'}), 404
+    user = User.query.get(g.user_id)
+    if user in community.members:
+        return jsonify({'message': 'Already a member'}), 200
+    community.members.append(user)
+    db.session.commit()
+    return jsonify({'message': 'Joined community'}), 200
+
+
+@app.route('/api/communities/<int:comm_id>/leave', methods=['DELETE'])
+@token_required
+def leave_community(comm_id):
+    """Leave a community you belong to."""
+    community = Community.query.get(comm_id)
+    if not community:
+        return jsonify({'error': 'Community not found'}), 404
+    user = User.query.get(g.user_id)
+    if user not in community.members:
+        return jsonify({'error': 'Not a member'}), 404
+    community.members.remove(user)
+    db.session.commit()
+    return jsonify({'message': 'Left community'}), 200
+
+
+@app.route('/api/communities/<int:comm_id>/members', methods=['GET'])
+def list_community_members(comm_id):
+    """List members of a community."""
+    community = Community.query.get(comm_id)
+    if not community:
+        return jsonify({'error': 'Community not found'}), 404
+    members = [{'id': u.id, 'username': u.username} for u in community.members]
+    return jsonify(members), 200
+
+
+@app.route('/api/communities/mine', methods=['GET'])
+@token_required
+def list_my_communities():
+    """List communities the logged-in user belongs to."""
+    user = User.query.get(g.user_id)
+    results = [
+        {
+            'id': c.id,
+            'name': c.name,
+            'description': c.description,
+            'member_count': len(c.members),
+            'owner_id': c.owner_id,
+        }
+        for c in user.communities
+    ]
+    return jsonify(results), 200
+
+
+@app.route('/api/communities/<int:comm_id>', methods=['GET', 'PUT'])
+@token_required
+def get_or_update_community(comm_id):
+    """Retrieve or update a community."""
+    community = Community.query.get(comm_id)
+    if not community:
+        return jsonify({'error': 'Community not found'}), 404
+
+    if request.method == 'GET':
+        return jsonify({
+            'id': community.id,
+            'name': community.name,
+            'description': community.description,
+            'member_count': len(community.members),
+            'owner_id': community.owner_id,
+        }), 200
+
+    # PUT - only owner may update
+    if community.owner_id != g.user_id:
+        return jsonify({'error': 'Only the owner can update this community'}), 403
+    data = request.get_json() or {}
+    new_name = sanitize_input(data.get('name', community.name).strip())
+    new_desc = sanitize_input(data.get('description', community.description or '').strip())
+    if new_name:
+        existing = Community.query.filter(Community.name == new_name, Community.id != comm_id).first()
+        if existing:
+            return jsonify({'error': 'Community with that name already exists'}), 409
+        community.name = new_name
+    community.description = new_desc
+    db.session.commit()
+    return jsonify({'id': community.id, 'name': community.name, 'description': community.description}), 200
+
+
+@app.route('/api/communities/<int:comm_id>', methods=['DELETE'])
+@token_required
+def delete_community(comm_id):
+    """Delete a community if the logged-in user is the owner."""
+    community = Community.query.get(comm_id)
+    if not community:
+        return jsonify({'error': 'Community not found'}), 404
+    if community.owner_id != g.user_id:
+        return jsonify({'error': 'Only the owner can delete this community'}), 403
+    db.session.delete(community)
+    db.session.commit()
+    return jsonify({'message': 'Community deleted'}), 200
+
+
+@app.route('/api/users/<int:target_id>/bookshelves', methods=['GET'])
+@token_required
+def list_user_bookshelves(target_id):
+    """List another user's bookshelves.
+
+    Friends can view all of each other's shelves. Non-friends only see
+    shelves marked as public.
+    """
+    viewer_id = g.user_id
+    if viewer_id == target_id:
+        shelves = Bookshelf.query.filter_by(user_id=target_id).order_by(Bookshelf.created_at.desc()).all()
+    else:
+        friendship = FriendRequest.query.filter(
+            FriendRequest.status == 'accepted',
+            ((FriendRequest.requester_id == viewer_id) & (FriendRequest.addressee_id == target_id)) |
+            ((FriendRequest.requester_id == target_id) & (FriendRequest.addressee_id == viewer_id))
+        ).first()
+        if friendship:
+            shelves = Bookshelf.query.filter_by(user_id=target_id).order_by(Bookshelf.created_at.desc()).all()
+        else:
+            shelves = Bookshelf.query.filter_by(user_id=target_id, is_public=True).order_by(Bookshelf.created_at.desc()).all()
+
+    results = []
+    for shelf in shelves:
+        results.append({
+            'id': shelf.id,
+            'name': shelf.name,
+            'description': shelf.description,
+            'is_public': shelf.is_public,
+            'book_count': len(shelf.books),
+            'created_at': shelf.created_at.isoformat() if shelf.created_at else None,
+        })
+    return jsonify(results), 200
+
 # === Core Logic Functions ===
 
 def detect_books_with_llm(image_path):
@@ -693,14 +1177,14 @@ def detect_books_with_llm(image_path):
                    error messages if detection fails or the LLM is unavailable.
     """
     if not llm_model:
-        print("LLM model not initialized during detection call.")
+        logger.error("LLM model not initialized during detection call.")
         return ["Error: LLM service not available"]
 
     try:
-        print(f"Processing image with LLM: {image_path}")
+        logger.info(f"Processing image with LLM: {image_path}")
         # Verify file exists before opening
         if not os.path.exists(image_path):
-            print(f"Error: Image file not found at {image_path}")
+            logger.error(f"Error: Image file not found at {image_path}")
             return ["Error: Temporary image file not found for analysis."]
 
         img = Image.open(image_path) # Open image using Pillow
@@ -730,75 +1214,75 @@ def detect_books_with_llm(image_path):
         )
 
         # Debugging: Log the raw response for inspection
-        print("--- LLM Raw Response Start ---")
+        logger.debug("--- LLM Raw Response Start ---")
         extracted_text = "" # Initialize default value
         try:
             # Check for safety blocks before accessing text
             # Accessing prompt_feedback raises AttributeError if no safety settings block it
             if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                print(f"LLM Prompt Blocked: {response.prompt_feedback.block_reason}")
-                print(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
+                logger.warning(f"LLM Prompt Blocked: {response.prompt_feedback.block_reason}")
+                logger.debug(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
                 return [f"LLM analysis failed: Blocked by safety filter ({response.prompt_feedback.block_reason})"]
 
             # Check if response candidate finished properly
             if not response.candidates or response.candidates[0].finish_reason != 1: # 1 = STOP
-                 print(f"LLM Warning: Response did not finish normally. Reason: {response.candidates[0].finish_reason if response.candidates else 'Unknown'}")
+                 logger.warning(f"LLM Warning: Response did not finish normally. Reason: {response.candidates[0].finish_reason if response.candidates else 'Unknown'}")
                  # Potentially still try to access text, but be aware it might be incomplete
 
             extracted_text = response.text
-            print(extracted_text)
+            logger.debug(extracted_text)
         except ValueError as ve:
             # This might indicate issues during text generation itself
-            print(f"ValueError accessing response text: {ve}")
+            logger.error(f"ValueError accessing response text: {ve}")
             # Log feedback if available
             if hasattr(response, 'prompt_feedback'):
-                 print(f"Prompt Feedback: {response.prompt_feedback}")
+                 logger.debug(f"Prompt Feedback: {response.prompt_feedback}")
             return ["LLM analysis blocked (Safety/Invalid Response)"]
         except AttributeError as ae:
             # Fallback if response.text doesn't exist - check prompt_feedback first
             if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
                  # If it was blocked, we already handled it above or should have
-                 print(f"AttributeError accessing text, but prompt feedback indicates block: {response.prompt_feedback.block_reason}")
+                 logger.warning(f"AttributeError accessing text, but prompt feedback indicates block: {response.prompt_feedback.block_reason}")
                  # Return the block reason if available
                  return [f"LLM analysis failed: Blocked by safety filter ({response.prompt_feedback.block_reason})"]
 
-            print(f"AttributeError accessing response text: {ae}. Checking parts...")
+            logger.error(f"AttributeError accessing response text: {ae}. Checking parts...")
             if hasattr(response, 'parts') and response.parts:
                 try:
                     extracted_text = '\n'.join(part.text for part in response.parts if hasattr(part, 'text'))
-                    print(f"Extracted from parts: {extracted_text}")
+                    logger.debug(f"Extracted from parts: {extracted_text}")
                 except Exception as part_err:
-                    print(f"Error extracting text from parts: {part_err}")
+                    logger.error(f"Error extracting text from parts: {part_err}")
                     return ["LLM analysis failed: Error parsing response parts."]
             else:
-                print("Could not extract text. No .text or valid .parts found.")
+                logger.error("Could not extract text. No .text or valid .parts found.")
                 return ["LLM analysis failed: Unexpected response structure."]
         except Exception as e:
-            print(f"An unexpected error occurred accessing LLM response text: {e}")
+            logger.error(f"An unexpected error occurred accessing LLM response text: {e}")
             return ["LLM analysis failed: Error reading response."]
         finally:
-             print("--- LLM Raw Response End ---")
+             logger.debug("--- LLM Raw Response End ---")
 
         # Process the extracted text
         if extracted_text:
             titles = [line.strip() for line in extracted_text.split('\n') if line.strip()]
             titles = [title for title in titles if 3 < len(title) < 150]
-            print(f"Processed titles: {titles}")
+            logger.debug(f"Processed titles: {titles}")
             return titles if titles else ["No valid book titles identified by LLM."]
         else:
-            print("LLM response processing yielded no text. Check raw response above.")
+            logger.warning("LLM response processing yielded no text. Check raw response above.")
             return ["LLM analysis returned no parseable text."]
 
     # Specific exception handling for Google AI library
     except genai.types.BlockedPromptException as bpe:
-        print(f"LLM Error: Prompt was blocked by API - {bpe}")
+        logger.error(f"LLM Error: Prompt was blocked by API - {bpe}")
         return ["LLM analysis failed: Prompt blocked by safety filters."]
     except genai.types.StopCandidateException as sce:
-        print(f"LLM Error: Generation stopped unexpectedly - {sce}")
+        logger.error(f"LLM Error: Generation stopped unexpectedly - {sce}")
         return ["LLM analysis failed: Generation stopped prematurely."]
     except Exception as e:
         # Catch other potential errors (e.g., network issues, image opening errors)
-        print(f"Generic error during LLM book detection: {str(e)}")
+        logger.error(f"Generic error during LLM book detection: {str(e)}")
         return [f"Error during LLM analysis: {str(e)}"]
 
 def get_recommendations(detected_books):
@@ -831,13 +1315,13 @@ def get_recommendations(detected_books):
                    not book.lower().startswith("no valid book titles")]
     
     if not valid_books:
-        print("No valid books detected to search for recommendations. Returning samples.")
-        return sample_recs 
+        logger.info("No valid books detected to search for recommendations. Returning samples.")
+        return sample_recs
 
     # --- Initial Search based on Titles --- 
     max_search_terms = 5 # Use up to 5 detected books
-    search_terms = valid_books[:max_search_terms]  
-    print(f"Phase 2.1: Getting recommendations based on detected books: {search_terms}")
+    search_terms = valid_books[:max_search_terms]
+    logger.info(f"Phase 2.1: Getting recommendations based on detected books: {search_terms}")
 
     initial_categories = set() # Collect categories from initial results
 
@@ -846,7 +1330,7 @@ def get_recommendations(detected_books):
             if len(recommendations) >= 6: 
                 break
             
-            print(f"Querying Google Books for title: {search_term}")
+            logger.debug(f"Querying Google Books for title: {search_term}")
             quoted_search_term = requests.utils.quote(search_term)
             # More results per query initially to gather categories
             response = requests.get(
@@ -887,7 +1371,7 @@ def get_recommendations(detected_books):
                             'previewLink': volume_info.get('previewLink', '')
                         }
                         recommendations.append(book)
-                        print(f"Added recommendation (from title search): {title}")
+                        logger.debug(f"Added recommendation (from title search): {title}")
                         
                         # Collect categories for phase 2 search
                         if categories:
@@ -897,17 +1381,17 @@ def get_recommendations(detected_books):
                     # ... existing logging logic ...
                          
     except requests.exceptions.RequestException as e:
-        print(f"Error querying Google Books API (Initial Search): {str(e)}")
+        logger.error(f"Error querying Google Books API (Initial Search): {str(e)}")
     except Exception as e:
-        print(f"Unexpected error processing initial recommendations: {str(e)}")
+        logger.error(f"Unexpected error processing initial recommendations: {str(e)}")
 
     # --- Phase 2.2: Category-Based Search --- 
-    print(f"Phase 2.2: Found initial categories: {initial_categories}")
+    logger.debug(f"Phase 2.2: Found initial categories: {initial_categories}")
     if len(recommendations) < 6 and initial_categories:
         # Limit the number of category searches to avoid too many API calls
         category_search_limit = 3
         categories_to_search = list(initial_categories)[:category_search_limit]
-        print(f"Searching based on categories: {categories_to_search}")
+        logger.debug(f"Searching based on categories: {categories_to_search}")
 
         try:
             for category in categories_to_search:
@@ -917,7 +1401,7 @@ def get_recommendations(detected_books):
                 # Construct category search query (e.g., subject:Fiction)
                 # Note: Google Books API uses 'subject:' for category searches
                 category_query = f"subject:{category}"
-                print(f"Querying Google Books for category: {category_query}")
+                logger.debug(f"Querying Google Books for category: {category_query}")
                 quoted_category_query = requests.utils.quote(category_query)
                 
                 # Fetch a few books for this category
@@ -956,25 +1440,25 @@ def get_recommendations(detected_books):
                                 'previewLink': volume_info.get('previewLink', '')
                             }
                             recommendations.append(book)
-                            print(f"Added recommendation (from category search '{category}'): {title}")
+                            logger.debug(f"Added recommendation (from category search '{category}'): {title}")
                         # (Optional: Log skipped category results)
 
         except requests.exceptions.RequestException as e:
-            print(f"Error querying Google Books API (Category Search): {str(e)}")
+            logger.error(f"Error querying Google Books API (Category Search): {str(e)}")
         except Exception as e:
-            print(f"Unexpected error processing category recommendations: {str(e)}")
+            logger.error(f"Unexpected error processing category recommendations: {str(e)}")
 
     # --- Phase 2.3: Open Library Search (Experimental) ---
     # Try Open Library if we still need more recommendations
     if len(recommendations) < 6:
-        print(f"Phase 2.3: Trying Open Library search as fallback/supplement.")
+        logger.debug("Phase 2.3: Trying Open Library search as fallback/supplement.")
         try:
             # Use the same initial search terms 
             for search_term in search_terms: 
                 if len(recommendations) >= 6:
                     break
 
-                print(f"Querying Open Library for: {search_term}")
+                logger.debug(f"Querying Open Library for: {search_term}")
                 # Open Library Search API endpoint
                 ol_search_url = f"https://openlibrary.org/search.json?q={requests.utils.quote(search_term)}&limit=3" 
                 response_ol = requests.get(ol_search_url, timeout=10) # Add timeout
@@ -1015,23 +1499,25 @@ def get_recommendations(detected_books):
                                 'previewLink': f"https://openlibrary.org{doc.get('key', '')}" if doc.get('key') else ''
                             }
                             recommendations.append(book)
-                            print(f"Added recommendation (from Open Library search): {title}")
+                            logger.debug(f"Added recommendation (from Open Library search): {title}")
                         else:
-                             if title == 'Unknown Title': print(f"Skipped OL item: Unknown Title")
-                             elif normalized_title in unique_titles_found: print(f"Skipped OL item (duplicate rec): {title}")
+                             if title == 'Unknown Title':
+                                 logger.debug("Skipped OL item: Unknown Title")
+                             elif normalized_title in unique_titles_found:
+                                 logger.debug(f"Skipped OL item (duplicate rec): {title}")
 
         except requests.exceptions.RequestException as e:
-            print(f"Error querying Open Library API: {str(e)}")
+            logger.error(f"Error querying Open Library API: {str(e)}")
         except Exception as e:
-            print(f"Unexpected error processing Open Library recommendations: {str(e)}")
+            logger.error(f"Unexpected error processing Open Library recommendations: {str(e)}")
 
     # --- Final Fallback & Return --- 
     if not recommendations:
-        print("Could not find any recommendations after all searches. Returning samples.")
+        logger.info("Could not find any recommendations after all searches. Returning samples.")
         return sample_recs
 
     # Ensure the final list does not exceed the limit
-    print(f"Returning final {len(recommendations[:6])} recommendations.")
+    logger.info(f"Returning final {len(recommendations[:6])} recommendations.")
     return recommendations[:6]
 
 if __name__ == '__main__':
@@ -1039,23 +1525,23 @@ if __name__ == '__main__':
         # Create database tables if they don't exist
         # Note: For more complex migrations later, consider Flask-Migrate
         db.create_all()
-        print(f"Database {DB_NAME} initialized/checked.")
+        logger.info(f"Database {DB_NAME} initialized/checked.")
     
-    print("Starting Bookshelf Recommender Backend...")
-    print("----------------------------------------")
+    logger.info("Starting Bookshelf Recommender Backend...")
+    logger.info("----------------------------------------")
     # Check for API key presence on startup
     if not api_key:
-        print("*** WARNING: GOOGLE_API_KEY not found in backend/.env ***")
-        print("*** Image analysis will fail. Please create .env file. ***")
+        logger.warning("*** WARNING: GOOGLE_API_KEY not found in backend/.env ***")
+        logger.warning("*** Image analysis will fail. Please create .env file. ***")
     else:
-        print("GOOGLE_API_KEY found.")
+        logger.info("GOOGLE_API_KEY found.")
         if not llm_model:
-            print("*** WARNING: Failed to initialize Gemini Model. Check API Key and backend logs. ***")
+            logger.warning("*** WARNING: Failed to initialize Gemini Model. Check API Key and backend logs. ***")
         else:
-            print("Gemini Model (gemini-1.5-flash) ready.")
-    print("----------------------------------------")
-    print("Requirements reminder:")
-    print("- Ensure GOOGLE_API_KEY is set in backend/.env")
-    print("- Run: pip install -r backend/requirements.txt")
-    print("----------------------------------------")
+            logger.info("Gemini Model (gemini-1.5-flash) ready.")
+    logger.info("----------------------------------------")
+    logger.info("Requirements reminder:")
+    logger.info("- Ensure GOOGLE_API_KEY is set in backend/.env")
+    logger.info("- Run: pip install -r backend/requirements.txt")
+    logger.info("----------------------------------------")
     app.run(debug=True, port=5001)

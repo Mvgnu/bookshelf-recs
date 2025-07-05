@@ -49,8 +49,13 @@ This document details the current and planned features of the application, expan
     *   [ ] Manually adding/editing books in the virtual shelf.
     *   [ ] Viewing/managing saved virtual bookshelves.
 *   **Social Features:**
-    *   [ ] Sharing virtual bookshelves (publicly or with specific users).
-    *   [ ] Viewing friends' bookshelves/activity.
+    *   [x] Sharing virtual bookshelves (publicly or with specific users).
+*   [x] Friend requests between users.
+*   [x] UI to manage friend lists and pending requests.
+*   [x] Viewing friends' bookshelves.
+*   [x] Community groups for sharing shelves and discussion.
+    *   [x] Users can list the communities they belong to and owners can delete a community.
+    *   [x] Owners can edit community name and description.
     *   [ ] Generating recommendations based on friends' overlapping libraries.
 *   **Interaction & Tracking:**
     *   [ ] Creating reading lists (Want to Read, Reading, Read).
@@ -60,7 +65,7 @@ This document details the current and planned features of the application, expan
 
 ### User Experience Enhancements (Target v0.6)
 
-*   [ ] Dark Mode theme.
+*   [x] Dark Mode theme.
 *   [ ] Accessibility audit and improvements (WCAG compliance).
 *   [ ] Advanced search and filtering within results/bookshelves.
 *   [ ] Integration with e-commerce platforms for purchasing books.
@@ -68,7 +73,8 @@ This document details the current and planned features of the application, expan
 
 ### Technical Enhancements
 
-*   [ ] Caching API responses (Google Books, LLM if applicable) to reduce costs and improve speed.
+*   [x] Caching API responses (Google Books, LLM if applicable) to reduce costs and improve speed.
+*   [x] Rate limiting of API endpoints using Flask-Limiter.
 *   [ ] Asynchronous task processing for image analysis (e.g., using Celery) for long-running jobs.
 *   [ ] Database implementation for users, bookshelves, reviews, etc.
 *   [ ] Dedicated image processing service (if complexity grows significantly).
