@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import LoginForm from './components/LoginForm';
 import RegisterForm from './components/RegisterForm';
-import BookshelfList from './components/BookshelfList'; // Import BookshelfList
-import BookshelfDetail from './components/BookshelfDetail'; // Import BookshelfDetail
-import { fetchWithAuth, getToken } from './utils/api'; // Import helpers from utils
+import BookshelfList from './components/BookshelfList';
+import BookshelfDetail from './components/BookshelfDetail';
+import FriendManager from './components/FriendManager';
+import CommunityManager from './components/CommunityManager';
+import { getToken } from './utils/api';
 import './App.css';
 
 // Helper functions getToken and fetchWithAuth are now in utils/api.js
@@ -15,7 +17,6 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null); // Will now contain { detected_books, recommendations, save_message }
   const [error, setError] = useState(null);
-  const [activeTab, setActiveTab] = useState('detected');
 
   // Authentication State
   const [currentUser, setCurrentUser] = useState(null); 
@@ -23,8 +24,9 @@ function App() {
   const [authLoading, setAuthLoading] = useState(true); 
 
   // Main content view state (when logged in)
-  const [mainView, setMainView] = useState('upload'); // 'upload', 'bookshelves'
+  const [mainView, setMainView] = useState('upload'); // 'upload', 'bookshelves', 'shelfDetail', 'friends', 'communities'
   const [selectedBookshelfId, setSelectedBookshelfId] = useState(null); // To view a specific shelf later
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
 
   // --- Effect for initial authentication check --- 
   useEffect(() => {
@@ -63,10 +65,16 @@ function App() {
           setAuthView('login');
         }
       }
+      setAuthLoading(false);
     };
-    
+
     checkAuth();
   }, []);
+
+  useEffect(() => {
+    document.body.classList.toggle('dark', darkMode);
+    localStorage.setItem('theme', darkMode ? 'dark' : 'light');
+  }, [darkMode]);
 
   // --- Authentication Handlers ---
   const handleLoginSuccess = (userData) => {
@@ -95,6 +103,10 @@ function App() {
     setMainView('upload');
     console.log('Successfully logged out');
   };
+
+  const toggleDarkMode = () => {
+    setDarkMode((prev) => !prev);
+  };
   
   const switchToLogin = () => setAuthView('login');
   const switchToRegister = () => setAuthView('register');
@@ -110,6 +122,16 @@ function App() {
   const switchToBookshelvesView = () => {
       setMainView('bookshelves');
       setSelectedBookshelfId(null); // Reset selected shelf
+  };
+
+  const switchToFriendsView = () => {
+      setMainView('friends');
+      setSelectedBookshelfId(null);
+  };
+
+  const switchToCommunitiesView = () => {
+      setMainView('communities');
+      setSelectedBookshelfId(null);
   };
 
   const handleSelectBookshelf = (shelfId) => {
@@ -143,14 +165,15 @@ function App() {
             let errorData = { error: `Upload failed with status ${response.status}` };
              try {
                  errorData = await response.json();
-             } catch (parseError) { console.warn("Could not parse error response from upload as JSON."); }
+             } catch (_parseError) {
+                 console.warn("Could not parse error response from upload as JSON.", _parseError);
+             }
             throw new Error(errorData.error || `Upload failed: ${response.statusText}`);
         }
         const data = await response.json(); // Contains detected_books, recommendations, save_message
         console.log('Upload successful:', data);
         setResults(data); // Set the entire results object
-        // Decide if we want to switch tabs/views automatically, for now, stay on upload view
-        // setActiveTab('recommendations'); 
+        // Decide if we want to switch tabs/views automatically, for now stay on upload view
     } catch (err) {
       console.error('Upload failed:', err);
       setError(err.message || 'Upload failed. Please try again.');
@@ -195,13 +218,19 @@ function App() {
               return (
                   <div className="auth-container">
                       <LoginForm onLoginSuccess={handleLoginSuccess} switchToRegister={switchToRegister} />
+                      <button onClick={toggleDarkMode} aria-pressed={darkMode} className="button-secondary theme-toggle">
+                          {darkMode ? 'Light Mode' : 'Dark Mode'}
+                      </button>
                   </div>
               );
           }
           if (authView === 'register') {
               return (
                   <div className="auth-container">
-                      <RegisterForm onRegisterSuccess={handleRegisterSuccess} switchToLogin={switchToLogin} /> 
+                      <RegisterForm onRegisterSuccess={handleRegisterSuccess} switchToLogin={switchToLogin} />
+                      <button onClick={toggleDarkMode} aria-pressed={darkMode} className="button-secondary theme-toggle">
+                          {darkMode ? 'Light Mode' : 'Dark Mode'}
+                      </button>
                   </div>
               );
           }
@@ -209,28 +238,53 @@ function App() {
           return (
               <div className="auth-container">
                   <LoginForm onLoginSuccess={handleLoginSuccess} switchToRegister={switchToRegister} />
+                  <button onClick={toggleDarkMode} aria-pressed={darkMode} className="button-secondary theme-toggle">
+                      {darkMode ? 'Light Mode' : 'Dark Mode'}
+                  </button>
               </div>
           );
       } else {
-          // User IS logged in - show content based on mainView
+          let content;
           switch (mainView) {
-              case 'upload':
-                  return renderUploadSection(); // Extracted upload UI
-              case 'bookshelves':
-                  return <BookshelfList onSelectShelf={handleSelectBookshelf} />;
-              case 'shelfDetail':
-                  // Render BookshelfDetail if an ID is selected
+            case 'upload':
+                content = renderUploadSection();
+                break;
+            case 'bookshelves':
+                content = <BookshelfList onSelectShelf={handleSelectBookshelf} />;
+                break;
+            case 'friends':
+                content = <FriendManager />;
+                break;
+            case 'communities':
+                content = <CommunityManager currentUserId={currentUser.id} />;
+                break;
+            case 'shelfDetail':
                   if (selectedBookshelfId) {
-                      return <BookshelfDetail shelfId={selectedBookshelfId} onBackToList={switchToBookshelvesView} />;
+                      content = <BookshelfDetail shelfId={selectedBookshelfId} onBackToList={switchToBookshelvesView} />;
                   } else {
-                      // Fallback if no ID somehow (e.g., direct navigation attempt?)
                       console.warn("Shelf detail view requested without a selected ID, returning to list.");
-                      switchToBookshelvesView(); // Go back to list
-                      return null; // Avoid rendering anything momentarily
+                      switchToBookshelvesView();
+                      content = null;
                   }
+                  break;
               default:
-                  return renderUploadSection(); // Fallback to upload
+                  content = renderUploadSection();
           }
+          return (
+              <>
+                  <nav className="main-nav">
+                      <button onClick={switchToUploadView} disabled={mainView === 'upload'}>Upload</button>
+                      <button onClick={switchToBookshelvesView} disabled={mainView === 'bookshelves'}>My Shelves</button>
+                      <button onClick={switchToFriendsView} disabled={mainView === 'friends'}>Friends</button>
+                      <button onClick={switchToCommunitiesView} disabled={mainView === 'communities'}>Communities</button>
+                      <button onClick={handleLogout}>Logout</button>
+                      <button onClick={toggleDarkMode} aria-pressed={darkMode} className="button-secondary">
+                          {darkMode ? 'Light Mode' : 'Dark Mode'}
+                      </button>
+                  </nav>
+                  {content}
+              </>
+          );
       }
   };
 
@@ -322,7 +376,31 @@ function App() {
                         <p>No books detected yet.</p>
                     )}
                 </div>
-                {/* TODO: Add rendering for recommendations if they exist */}
+                {/* Recommendations */}
+                {results.recommendations && (
+                    <div className="recommendations-results">
+                        <h2>Recommended Books</h2>
+                        {results.recommendations.length > 0 ? (
+                            <ul className="recommendation-list">
+                                {results.recommendations.map((book, index) => (
+                                    <li key={`rec-${index}`} className="recommendation-item">
+                                        {book.image && (
+                                            <img src={book.image} alt={`Cover of ${book.title}`} className="recommendation-cover" />
+                                        )}
+                                        <div className="recommendation-info">
+                                            <strong>{book.title}</strong>
+                                            {book.authors && (
+                                                <span className="recommendation-authors"> - {book.authors.join(', ')}</span>
+                                            )}
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        ) : (
+                            <p>No recommendations available.</p>
+                        )}
+                    </div>
+                )}
             </div>
        )}
     </>

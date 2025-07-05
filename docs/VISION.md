@@ -37,4 +37,4 @@ To transform personal libraries into dynamic engines for book discovery and comm
 - User engagement (uploads per user, session duration).
 - High conversion rate from recommendation to user interest (e.g., clicking preview, adding to list).
 - Positive user feedback on recommendation quality.
-- Growth in user base and community interaction (Future Goal). 
+- Growth in user base and community interaction, including active community groups.

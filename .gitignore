@@ -4,4 +4,6 @@ node_modules/
 __pycache__/
 .env
 *.sqlite3
-venv/ 
+books_cache.sqlite
+venv/
+instance/
