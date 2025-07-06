@@ -1,3 +1,12 @@
+/*
+# musikconnect tags
+purpose: User registration form component
+inputs: username, email, password
+outputs: registration API request, success message
+status: active
+depends_on: React, fetchWithAuth
+related_docs: frontend/src/components/README.md
+*/
 import React, { useState } from 'react';
 
 function RegisterForm({ onRegisterSuccess, switchToLogin }) {

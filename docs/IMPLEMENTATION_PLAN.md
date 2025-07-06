@@ -13,7 +13,7 @@ This document outlines the phased implementation strategy and technical decision
 3.  **Backend Cleanup:**
     *   [x] Remove Tesseract and OpenCV dependencies.
     *   [x] Update comments and docstrings in `backend/app.py`.
-4.  **Testing:** [ ] - Requires User Input/Testing.
+4.  **Testing:** [x] Automated backend tests implemented with PyTest.
 
 ## Phase 2: Recommendation Enhancement (v0.4)
 
@@ -55,10 +55,19 @@ This document outlines the phased implementation strategy and technical decision
 
 **Tasks:**
 
-1.  **UI Refinements:** [ ] Dark Mode, accessibility improvements, advanced styling.
-2.  **Feature Additions:** [ ] Reading progress tracking, purchase links, book search within shelves, shelf sharing (public toggle needs implementation).
-3.  **Performance Optimization:** [ ] Caching, async tasks (if needed), database indexing.
-4.  **Deployment:** [ ] Prepare for production (e.g., switch DB, configure WSGI server).
+1.  **UI Refinements:** [x] Dark Mode implemented. Accessibility improvements and advanced styling pending.
+2.  **Feature Additions:** [ ] Reading progress tracking, purchase links, book search within shelves.
+    * Public bookshelf sharing implemented via `is_public` flag and new endpoints.
+    * Friend request system implemented for connecting users.
+    * React UI for managing friends and requests.
+    * Endpoint and UI to view a friend's bookshelves.
+    * Community groups with join/leave endpoints for shared shelves.
+    * Endpoint to list user's communities and allow owners to delete a community.
+    * Endpoint to view and update community details.
+    * Search communities by name and edit them via the UI.
+3.  **Performance Optimization:** [x] Caching, async tasks (if needed), database indexing.
+4.  **Rate Limiting:** [x] Protect API endpoints using Flask-Limiter to mitigate abuse.
+5.  **Deployment:** [ ] Prepare for production (e.g., switch DB, configure WSGI server).
 
 ## Technology Stack Rationale
 

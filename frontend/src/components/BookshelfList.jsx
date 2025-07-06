@@ -1,3 +1,12 @@
+/*
+# musikconnect tags
+purpose: Display and manage user's bookshelves
+inputs: API data via fetchWithAuth, user interactions
+outputs: list UI, shelf selection events
+status: active
+depends_on: React, fetchWithAuth
+related_docs: frontend/src/components/README.md
+*/
 import React, { useState, useEffect } from 'react';
 import { fetchWithAuth } from '../utils/api'; // Assuming fetchWithAuth is moved to utils
 

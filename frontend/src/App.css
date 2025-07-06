@@ -36,6 +36,16 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+body.dark {
+  color-scheme: dark;
+  --background-color: #121212;
+  --content-bg-color: #1e1e1e;
+  --light-gray: #343a40;
+  --medium-gray: #495057;
+  --dark-gray: #adb5bd;
+  --text-color: #f8f9fa;
+}
+
 .App {
   max-width: 1200px;
   margin: 0 auto;
@@ -1025,4 +1035,48 @@ main {
   background-color: var(--dark-gray);
   border-color: var(--dark-gray);
   color: white;
+}
+
+.theme-toggle { margin-top: 1rem; }
+
+/* Friend manager styles */
+.friend-manager {
+  padding: 1rem;
+}
+.friend-request-form {
+  margin-bottom: 1rem;
+}
+.friend-section {
+  margin-bottom: 1.5rem;
+}
+.friend-section ul {
+  list-style: none;
+  padding: 0;
+}
+.friend-section li {
+  margin-bottom: 0.5rem;
+}
+.friend-section button {
+  margin-left: 0.5rem;
+}
+
+/* Community manager styles */
+.community-manager {
+  padding: 1rem;
+}
+.community-create-form {
+  margin-bottom: 1rem;
+}
+.community-create-form input {
+  margin-right: 0.5rem;
+}
+.community-lists ul {
+  list-style: none;
+  padding: 0;
+}
+.community-lists li {
+  margin-bottom: 0.5rem;
+}
+.community-lists button {
+  margin-left: 0.5rem;
 }

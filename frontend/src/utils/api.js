@@ -37,10 +37,10 @@ export const fetchWithAuth = async (url, options = {}) => {
         try {
             // Try to parse JSON error response from backend
             errorData = await response.json();
-        } catch (parseError) {
+        } catch (_err) {
             // If parsing fails, use the status text
             errorData.error = errorData.error + ": " + response.statusText;
-            console.warn("Could not parse error response as JSON.");
+            console.warn("Could not parse error response as JSON.", _err);
         }
         throw new Error(errorData.error || "An unknown API error occurred");
       }

@@ -1,3 +1,12 @@
+/*
+# musikconnect tags
+purpose: User login form component
+inputs: identifier, password from user
+outputs: login API request, authentication state
+status: active
+depends_on: React, fetchWithAuth
+related_docs: frontend/src/components/README.md
+*/
 import React, { useState } from 'react';
 
 function LoginForm({ onLoginSuccess, switchToRegister }) {
